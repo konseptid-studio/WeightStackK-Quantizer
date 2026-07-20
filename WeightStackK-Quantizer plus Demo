@@ -1,0 +1,161 @@
+// =============================================
+// WeightStackK Layered Quantizer
+// SAFE35 Weight Stack + Region Hybrid Simulation for 2D images
+// =============================================
+// Copyright (c) 2025-2026 Ivan Kolev / KonseptID Studio
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
+#include <algorithm>
+#include <cmath>
+#include <cstdint>
+#include <vector>
+#include <unordered_map>
+#include <iostream>
+#include <iomanip>
+#include <string>
+
+struct RGBA8 { std::uint8_t r, g, b, a = 255; };
+
+inline double Dist2(const RGBA8& a, const RGBA8& b) {
+    double dr = a.r - b.r, dg = a.g - b.g, db = a.b - b.b;
+    return dr*dr + dg*dg + db*db;
+}
+
+inline RGBA8 ToRGBA(double r, double g, double b) {
+    auto clamp = [](double v){ return static_cast<std::uint8_t>(std::clamp(std::lround(v), 0LL, 255LL)); };
+    return {clamp(r), clamp(g), clamp(b), 255};
+}
+
+inline int Chroma(const RGBA8& c) {
+    return std::max({c.r, c.g, c.b}) - std::min({c.r, c.g, c.b});
+}
+
+// Simple overlay blend
+RGBA8 BlendOverlay(const RGBA8& bottom, const RGBA8& top, double opacity) {
+    auto lerp = [&](double a, double b, double t){ return a + (b-a)*t; };
+    return ToRGBA(
+        lerp(bottom.r, top.r, opacity),
+        lerp(bottom.g, top.g, opacity),
+        lerp(bottom.b, top.b, opacity)
+    );
+}
+
+// ====================== WeightStackK with Layered Simulation ======================
+std::vector<RGBA8> WeightStackK_Layered(const std::vector<RGBA8>& pixels, int max_colors, double vibrancy = 1.0, int layers = 3) {
+    if (max_colors < 1) max_colors = 1;
+    if (pixels.empty()) return {{0,0,0,255}};
+
+    // Binning
+    std::unordered_map<uint32_t, struct {double r=0,g=0,b=0; int cnt=0;}> bins;
+    for (const auto& p : pixels) {
+        uint32_t key = ((p.r>>3)<<10) | ((p.g>>3)<<5) | (p.b>>3);
+        auto& bin = bins[key];
+        bin.r += p.r; bin.g += p.g; bin.b += p.b; ++bin.cnt;
+    }
+
+    struct Sample {
+        RGBA8 color;
+        int weight;
+        double sat;
+    };
+    std::vector<Sample> samples;
+    for (const auto& kv : bins) {
+        const auto& b = kv.second;
+        RGBA8 col = ToRGBA(b.r/b.cnt, b.g/b.cnt, b.b/b.cnt);
+        samples.push_back({col, b.cnt, (double)Chroma(col)});
+    }
+
+    if (static_cast<int>(samples.size()) <= max_colors) {
+        std::vector<RGBA8> out; for (auto& s:samples) out.push_back(s.color);
+        return out;
+    }
+
+    // Weight Stack Sorting
+    std::sort(samples.begin(), samples.end(), [&](const Sample& a, const Sample& b){
+        double score_a = a.weight * (8.0 + a.sat * (12.0 + vibrancy*12.0));
+        double score_b = b.weight * (8.0 + b.sat * (12.0 + vibrancy*12.0));
+        return score_a > score_b;
+    });
+
+    std::vector<RGBA8> base_palette;
+    for (int i = 0; i < max_colors && i < (int)samples.size(); ++i)
+        base_palette.push_back(samples[i].color);
+
+    if (layers <= 1) return base_palette;
+
+    // === Layered Simulation (3-4 layers) ===
+    std::vector<RGBA8> final_palette;
+    final_palette.reserve(base_palette.size());
+
+    for (size_t i = 0; i < base_palette.size(); ++i) {
+        RGBA8 top = base_palette[i];                    // strongest / top layer
+        RGBA8 mid = (i+1 < base_palette.size()) ? base_palette[i+1] : top;
+        RGBA8 base = (i+2 < base_palette.size()) ? base_palette[i+2] : mid;
+
+        // Simulate physical stacking: base -> mid -> top
+        RGBA8 mix1 = BlendOverlay(base, mid, 0.55);
+        RGBA8 result = BlendOverlay(mix1, top, 0.65);
+
+        final_palette.push_back(result);
+    }
+
+    return final_palette;
+}
+
+// ====================== Main ======================
+int main(int argc, char** argv) {
+    if (argc < 3) {
+        std::cout << "Usage: " << argv[0] << " <image> <colors> [vibrancy=1.0] [layers=3]\n";
+        return 1;
+    }
+
+    int w, h, n;
+    unsigned char* data = stbi_load(argv[1], &w, &h, &n, 4);
+    if (!data) {
+        std::cerr << "Failed to load " << argv[1] << std::endl;
+        return 1;
+    }
+
+    std::vector<RGBA8> pixels;
+    pixels.reserve(w*h);
+    for (int i = 0; i < w*h*4; i += 4) {
+        pixels.push_back({data[i], data[i+1], data[i+2], data[i+3]});
+    }
+    stbi_image_free(data);
+
+    int max_colors = std::atoi(argv[2]);
+    double vibrancy = (argc > 3) ? std::atof(argv[3]) : 1.0;
+    int layers = (argc > 4) ? std::atoi(argv[4]) : 3;
+
+    auto palette = WeightStackK_Layered(pixels, max_colors, vibrancy, layers);
+
+    std::cout << "WeightStackK Layered Palette (" << palette.size() << " colors, " << layers << " layers simulated):\n\n";
+    for (size_t i = 0; i < palette.size(); ++i) {
+        std::cout << std::setw(2) << i << ": #" 
+                  << std::hex << std::uppercase << std::setfill('0')
+                  << std::setw(2) << (int)palette[i].r
+                  << std::setw(2) << (int)palette[i].g
+                  << std::setw(2) << (int)palette[i].b 
+                  << std::dec << "   RGB(" 
+                  << (int)palette[i].r << "," 
+                  << (int)palette[i].g << "," 
+                  << (int)palette[i].b << ")\n";
+    }
+
+    return 0;
+}

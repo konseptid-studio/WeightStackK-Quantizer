@@ -27,7 +27,7 @@ WeightStackK’s frequency × chroma scoring continues to protect saturated colo
 g++ -std=c++17 -O2 demo.cpp -o weightstackk_demo
 ./weightstackk_demo photo.jpg 12 1.25 12 1
 
-===Minimal C++ usage=====================================================================================================
+### Minimal C++ usage
 #include "WeightStackK.hpp"
 
 weightstackk::QuantizeParams p;
